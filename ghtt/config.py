@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #%%
 import csv
+import itertools
 import re
 from operator import attrgetter
 from typing import List, Dict, Optional
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 import click
 from jinja2 import Template
 from natsort import natsorted
+import requests
 import yaml
 
 
@@ -71,7 +73,43 @@ def get_persons(persons_config: dict, usernames: List[str] = [], groups: List[st
     try:
         with open(persons_config["source"]) as f:
             rows = csv.DictReader(f, delimiter=',', quotechar='"')
+            rows_copy, rows = itertools.tee(rows)
+
+            # Convert from Entra ID to GitHub usernames if needed
+            converted_rows = []
+            to_convert = []
+
             for row in rows:
+                # Match username fields against Entra ID regex 
+                if re.match('#(\d|\w){8}-(\d|\w){4}-(\d|\w){4}-(\d|\w){4}-(\d|\w){12}', row[mapping["username"]]):
+                    to_convert.append({
+                        "studentNumber": row[mapping.get("student-number", "OrgDefinedId")].strip("#"),
+                        "email": row[mapping.get("email", "Email")]
+                    })
+
+            if len(to_convert) > 0:
+                response = requests.post("http://localhost:5000/convert/json", json={"students": to_convert})
+
+                if response.ok:
+                    response_json = response.json()
+
+                    for row in rows_copy:
+                        user = next((student for student in response_json if student["email"] == row[mapping.get("email", "Email")]), None)
+                        username = None
+
+                        if user:
+                            username = user.get("username", None)
+
+                        if username:
+                            row[mapping["username"]] = f"#{username}"
+                        
+                        converted_rows.append(row) 
+                else:
+                    click.secho("Could not convert student Entra IDs to GitHub usernames: {}\n{}".format(response.status_code, response.text), fg="red")
+            else:
+                converted_rows = rows_copy
+
+            for row in converted_rows:
                 person = Person(row[mapping['username']], )
                 person.username = person.username.strip("#")
                 if usernames and person.username not in usernames:
